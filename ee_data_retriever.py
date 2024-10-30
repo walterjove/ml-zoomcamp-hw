@@ -1,6 +1,7 @@
 import ee
 import pandas as pd
 import logging
+import os
 from datetime import datetime
 
 # Initialize logging to monitor the background process
@@ -24,7 +25,7 @@ def authenticate_ee():
 states = ["Iowa", "Illinois"]
 
 # Define the date range for the full month of August 2022
-dates = pd.date_range(start="2022-06-01", end="2022-08-31")
+dates = pd.date_range(start="2022-06-01", end="2022-08-31", freq='W')
 
 def get_closest_sentinel_image(county_geom, date):
     start_date = (pd.to_datetime(date) - pd.Timedelta(days=3)).strftime('%Y-%m-%d')
@@ -37,7 +38,7 @@ def get_closest_sentinel_image(county_geom, date):
         .sort('system:time_start') \
         .first()
 
-    if sentinel is None:
+    if sentinel.getInfo() is None:
         logging.warning(f"No Sentinel-2 image available between {start_date} and {end_date}.")
         return None
 
@@ -94,10 +95,17 @@ def get_fields_for_county(county_geom, date):
 
     return ee_to_pandas(sampled_fields)
 
+def append_to_csv(data, path):
+    """Append DataFrame to CSV, create file with headers if it doesn't exist."""
+    if not os.path.isfile(path):
+        data.to_csv(path, index=False)  # Write with headers
+    else:
+        data.to_csv(path, mode='a', header=False, index=False)  # Append without headers
+
 def main():
     authenticate_ee()  # Ensure authentication is handled
 
-    all_data = pd.DataFrame()
+    csv_path = "county_level_crop_data_with_indices_and_field_ids.csv"
 
     for state in states:
         logging.info(f"Processing state: {state}")
@@ -107,7 +115,7 @@ def main():
 
         for date in dates:
             for county in counties.toList(counties.size()).getInfo():
-                county_geom = ee.Geometry.Geometry(ee.Feature(county).geometry())
+                county_geom = ee.Geometry(ee.Feature(county).geometry())
                 logging.info(f"Processing {county['properties']['NAME']} on {date.date()}...")
 
                 df = get_fields_for_county(county_geom, date.strftime('%Y-%m-%d'))
@@ -115,11 +123,10 @@ def main():
                     df['state'] = state
                     df['county'] = county['properties']['NAME']
                     df['date'] = date
-                    all_data = pd.concat([all_data, df], ignore_index=True)
 
-    csv_path = "county_level_crop_data_with_indices_and_field_ids.csv"
-    all_data.to_csv(csv_path, index=False)
-    logging.info(f"Data saved to {csv_path}")
+                    # Append to CSV file
+                    append_to_csv(df, csv_path)
+                    logging.info(f"Appended data for {county['properties']['NAME']} on {date.date()} to CSV.")
 
 if __name__ == "__main__":
     try:
