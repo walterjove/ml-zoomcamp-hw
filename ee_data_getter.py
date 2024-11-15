@@ -2,6 +2,10 @@ import ee
 import pandas as pd
 import logging
 import os
+try:
+    import StringIO 
+except ImportError:
+    from io import StringIO 
 from datetime import datetime
 
 # Initialize logging to monitor the background process
@@ -24,92 +28,43 @@ def authenticate_ee():
 # Load the CSB field boundaries dataset
 CSB_ASSET = 'projects/nass-csb/assets/csb1623/CSBAL1623'
 
-def get_closest_sentinel_image(geometry, date):
-    """Find the closest available Sentinel-2 image."""
-    start_date = (pd.to_datetime(date) - pd.Timedelta(days=3)).strftime('%Y-%m-%d')
-    end_date = (pd.to_datetime(date) + pd.Timedelta(days=3)).strftime('%Y-%m-%d')
+def get_fields_for_mclean():
+    """Filter fields for McLean County, Illinois."""
+    # Load the CSBAL1623 FeatureCollection
+    field_boundaries = ee.FeatureCollection(CSB_ASSET)
 
-    sentinel = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
-        .filterDate(start_date, end_date) \
-        .filterBounds(geometry) \
-        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10)) \
-        .sort('system:time_start') \
-        .first()
-
-    if sentinel.getInfo() is None:
-        logging.warning(f"No Sentinel-2 image available between {start_date} and {end_date}.")
-        return None
-
-    return sentinel
-
-def calculate_indices(sentinel):
-    """Calculate NDVI, EVI, GNDVI, NDWI, and SAVI from Sentinel-2 data."""
-    ndvi = sentinel.normalizedDifference(['B8', 'B4']).rename('NDVI')
-    evi = sentinel.expression(
-        '2.5 * ((B8 - B4) / (B8 + 6 * B4 - 7.5 * B2 + 1))',
-        {'B8': sentinel.select('B8'), 'B4': sentinel.select('B4'), 'B2': sentinel.select('B2')}
-    ).rename('EVI')
-    gndvi = sentinel.normalizedDifference(['B8', 'B3']).rename('GNDVI')
-    ndwi = sentinel.normalizedDifference(['B8', 'B11']).rename('NDWI')
-    savi = sentinel.expression(
-        '((B8 - B4) / (B8 + B4 + 0.5)) * 1.5',
-        {'B8': sentinel.select('B8'), 'B4': sentinel.select('B4')}
-    ).rename('SAVI')
-
-    return ndvi.addBands([evi, gndvi, ndwi, savi])
-
-def get_data_for_fields(field_boundary_fc, date):
-    """Retrieve indices and crop type for each field."""
-    sentinel = get_closest_sentinel_image(field_boundary_fc.geometry(), date)
-
-    if sentinel is None:
-        return pd.DataFrame()
-
-    indices = calculate_indices(sentinel)
-
-    def compute_field_stats(field):
-        stats = indices.reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=field.geometry(), scale=10, maxPixels=1e12, bestEffort=True
+    # Load the TIGER counties dataset and filter for McLean County in Illinois
+    counties = ee.FeatureCollection('TIGER/2018/Counties')
+    mclean_county = counties.filter(
+        ee.Filter.And(
+            ee.Filter.eq('NAME', 'McLean'),  # County name
+            ee.Filter.eq('STATEFP', '17')   # Illinois FIPS code
         )
-        return field.set(stats)
+    )
 
-    field_data = field_boundary_fc.map(compute_field_stats)
-    valid_fields = field_data.filter(ee.Filter.notNull(['NDVI']))
+    # Filter the field boundaries for features within McLean County
+    mclean_fields = field_boundaries.filterBounds(mclean_county.geometry())
+    return mclean_fields
 
-    def ee_to_pandas(fc):
-        features = fc.getInfo()['features']
-        data = [{**f['properties'], 'geometry': f['geometry']} for f in features]
-        return pd.DataFrame(data)
-
-    return ee_to_pandas(valid_fields)
+def feature_collection_to_dataframe(fc):
+    """Convert a GEE FeatureCollection to a Pandas DataFrame."""
+    features = fc.getInfo()['features']
+    data = [{**f['properties'], 'geometry': f['geometry']} for f in features]
+    return pd.DataFrame(data)
 
 def main():
     authenticate_ee()
 
-    # Load the CSB field boundaries from GEE
-    field_boundaries = ee.FeatureCollection(CSB_ASSET)
+    # Get all fields for McLean County
+    mclean_fields = get_fields_for_mclean()
 
-    csv_path = "csb_field_data.csv"
+    # Convert to DataFrame
+    df = feature_collection_to_dataframe(mclean_fields)
 
-    # Define the date range
-    dates = pd.date_range(start="2022-06-01", end="2022-08-31")
-
-    for date in dates:
-        logging.info(f"Processing date: {date}")
-        df = get_data_for_fields(field_boundaries, date.strftime('%Y-%m-%d'))
-
-        if not df.empty:
-            df['date'] = date
-            # Append to CSV
-            append_to_csv(df, csv_path)
-            logging.info(f"Data for {date} appended to CSV.")
-
-def append_to_csv(data, path):
-    """Append DataFrame to CSV."""
-    if not os.path.isfile(path):
-        data.to_csv(path, index=False)
-    else:
-        data.to_csv(path, mode='a', header=False, index=False)
+    # Save to CSV
+    csv_path = "mclean_fields.csv"
+    df.to_csv(csv_path, index=False)
+    logging.info(f"Saved McLean fields to {csv_path}")
 
 if __name__ == "__main__":
     try:
